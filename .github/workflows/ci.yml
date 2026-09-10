@@ -1,0 +1,23 @@
+# Los chequeos viven en el repositorio `.github` de la organización, así que
+# acá sólo se los llama. Cambiarlos es cambiarlos en un solo lugar.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  app:
+    # Sólo lectura. Estos chequeos clonan, instalan dependencias y comprueban:
+    # no comentan, no etiquetan, no publican.
+    #
+    # El workflow llamado declara lo mismo en su trabajo, que es donde el
+    # permiso de verdad se aplica; esto pone el techo desde acá, porque un
+    # llamado no puede pedir más de lo que el llamador le da. Escrito en los dos
+    # lados a propósito: sin esto, el análisis estático de cada repositorio ve
+    # un trabajo sin `permissions` y no puede saber que el otro archivo lo
+    # arregla.
+    permissions:
+      contents: read
+    uses: Vasak-OS/.github/.github/workflows/app.yml@main

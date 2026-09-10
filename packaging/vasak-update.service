@@ -1,0 +1,30 @@
+[Unit]
+Description=Comprobar si hay actualizaciones de VasakOS
+# Sin red no hay nada que comprobar, y el temporizador es persistente: si la
+# corrida se saltea, systemd la repone en cuanto haya red.
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/vasak-update --check
+
+# El aviso lleva un botón, y `notify-send` con acciones espera a que alguien
+# lo apriete o a que el cartel expire. Por eso el proceso vive un rato: el
+# límite es lo que impide que un servidor de notificaciones que no expira
+# —o que se cuelga— deje esto corriendo hasta el próximo arranque.
+TimeoutStartSec=3min
+
+# Un comprobador de actualizaciones no necesita nada del sistema: lee la base
+# de pacman, escribe un archivo suyo en el estado del usuario y manda una
+# notificación. Todo lo demás se le saca.
+NoNewPrivileges=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictNamespaces=true
+RestrictRealtime=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+SystemCallArchitectures=native

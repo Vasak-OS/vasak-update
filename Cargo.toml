@@ -1,0 +1,34 @@
+[package]
+name = "vasak-update"
+version = "0.1.0"
+edition = "2021"
+description = "Avisa cuando hay actualizaciones del sistema, y qué mirar antes de aplicarlas"
+license = "GPL-3.0-or-later"
+repository = "https://github.com/Vasak-OS/vasak-update"
+
+# Dos, y con motivo. Todo lo demás se hace con la biblioteca estándar y con
+# programas que ya están en el sistema:
+#
+#   - la notificación va por `notify-send`, de libnotify, que ya es
+#     dependencia del escritorio. Hablar D-Bus desde acá pediría `zbus` —más de
+#     un megabyte de binario y un ejecutor— para mandar un mensaje una vez por
+#     día. Un `fork` cuesta menos.
+#   - el horario lo lleva systemd con un temporizador, así que no hay ningún
+#     formato de configuración que leer ni relojes que mirar.
+#
+# Queda `serde_json` para la salida que consume la pantalla de Configuración.
+# Escribir JSON a mano es donde aparecen los errores de escapado, y una ruta de
+# archivo con comillas adentro es exactamente lo que este programa lista.
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Este programa corre una vez por día y vive unos segundos. Lo que importa es
+# cuánto ocupa y cuánto tarda en arrancar, no cuántas operaciones por segundo
+# hace: por eso `opt-level = "s"` y no `3`.
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
