@@ -20,8 +20,8 @@ use std::path::PathBuf;
 use std::process::{Command, Stdio};
 
 use crate::analisis::{
-    es_paquete_de_kernel, espacio_necesario_en_boot, mayor_initramfs, parsear_actualizaciones,
-    parsear_pacnew, Actualizacion, Preflight,
+    espacio_necesario_en_boot, mayor_initramfs, parsear_actualizaciones, parsear_pacnew,
+    razones_para_reiniciar, repartir_listado, Actualizacion, Motivo, Preflight, Razon,
 };
 use crate::aviso::Recuerdo;
 use crate::fallos::{clasificar, Fallo};
@@ -86,25 +86,53 @@ pub fn estado() -> Estado {
     }
 }
 
-/// Cuáles de los que se actualizan son kernels.
+/// Por qué habría que reiniciar, si hay por qué.
 ///
-/// Se pregunta por los archivos que **ya tienen instalados**: el paquete está
-/// instalado —por eso se actualiza— así que es información local, sin red y
-/// sin la base de archivos.
-pub fn kernels_entre(actualizaciones: &[Actualizacion]) -> Vec<String> {
-    actualizaciones
+/// Se pregunta por los archivos que los paquetes **ya tienen instalados**: el
+/// paquete está instalado —por eso se actualiza— así que es información local,
+/// sin red y sin la base de archivos.
+///
+/// En **una** llamada y no una por paquete. `pacman -Ql` acepta varios y
+/// prefija cada línea con el nombre, que es lo que hace falta para repartir.
+/// Con 200 paquetes son 15,7 s medidos contra 0,14 s, porque casi todo el
+/// costo es arrancar el proceso y abrir la base; y una actualización de un mes
+/// en un sistema rolling son cientos de paquetes, o sea la pantalla tardando
+/// medio minuto en abrir.
+pub fn razones_entre(actualizaciones: &[Actualizacion]) -> Vec<Razon> {
+    if actualizaciones.is_empty() {
+        return Vec::new();
+    }
+
+    let mut args: Vec<&str> = Vec::with_capacity(actualizaciones.len() + 1);
+    args.push("-Ql");
+    args.extend(actualizaciones.iter().map(|a| a.nombre.as_str()));
+
+    let salida = salida_de("pacman", &args);
+    let por_paquete = repartir_listado(&salida);
+
+    // Se recorre la lista de actualizaciones y no el mapa para que el orden no
+    // dependa del recorrido de una tabla hash: dos ejecuciones seguidas
+    // mostrarían los mismos paquetes en distinto orden y parecería que cambió
+    // algo.
+    let archivos: Vec<(String, String)> = actualizaciones
         .iter()
-        .filter(|a| es_paquete_de_kernel(&salida_de("pacman", &["-Qlq", &a.nombre])))
-        .map(|a| a.nombre.clone())
-        .collect()
+        .filter_map(|a| {
+            por_paquete
+                .get(a.nombre.as_str())
+                .map(|archivos| (a.nombre.clone(), archivos.clone()))
+        })
+        .collect();
+
+    razones_para_reiniciar(&archivos)
 }
 
 pub fn preflight(pendientes: &[Actualizacion]) -> Preflight {
-    let kernels = kernels_entre(pendientes);
-    let necesario = espacio_necesario_en_boot(!kernels.is_empty(), el_mayor_initramfs());
+    let razones = razones_entre(pendientes);
+    let hay_kernels = razones.iter().any(|r| r.motivo == Motivo::Kernel);
+    let necesario = espacio_necesario_en_boot(hay_kernels, el_mayor_initramfs());
     Preflight::nuevo(
         pendientes.len(),
-        kernels,
+        razones,
         parsear_pacnew(&salida_de("pacdiff", &["--output", "--nocolor"])),
         libre_en_boot(),
         necesario,
