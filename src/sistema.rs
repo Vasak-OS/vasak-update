@@ -15,13 +15,15 @@
 //! las transacciones, y dos programas peleándose por `db.lck` dan un fallo que
 //! no se entiende.
 
+use std::collections::HashMap;
 use std::io::Write;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 
 use crate::analisis::{
     espacio_necesario_en_boot, mayor_initramfs, parsear_actualizaciones, parsear_pacnew,
-    razones_para_reiniciar, repartir_listado, Actualizacion, Motivo, Preflight, Razon,
+    parsear_paginas, razones_para_reiniciar, repartir_listado, Actualizacion, Motivo, Preflight,
+    Razon,
 };
 use crate::aviso::Recuerdo;
 use crate::fallos::{clasificar, Fallo};
@@ -84,6 +86,39 @@ pub fn estado() -> Estado {
         }
         _ => Estado::NoSePudo(clasificar(&String::from_utf8_lossy(&salida.stderr))),
     }
+}
+
+/// Adónde mirar para saber qué cambia en cada paquete.
+///
+/// Sale de la base de paquetes que ya está sincronizada, o sea **sin red**: la
+/// página del proyecto es un campo de la base, no algo que haya que ir a
+/// buscar. Para los nuestros es el repositorio, donde están los commits; para
+/// los de Arch es la página de quien lo escribe, que es lo que hay.
+///
+/// `LC_ALL=C` no es un detalle. `pacman` traduce los nombres de los campos, así
+/// que en una sesión en español diría `Nombre` y `parsear_paginas` no
+/// encontraría nada — y no fallaría, devolvería un mapa vacío y la pantalla se
+/// quedaría sin enlaces sin que nada lo diga.
+///
+/// En una llamada para todos los paquetes, por lo mismo que `razones_entre`.
+pub fn paginas_de(actualizaciones: &[Actualizacion]) -> HashMap<String, String> {
+    if actualizaciones.is_empty() {
+        return HashMap::new();
+    }
+
+    let mut args: Vec<&str> = Vec::with_capacity(actualizaciones.len() + 1);
+    args.push("-Si");
+    args.extend(actualizaciones.iter().map(|a| a.nombre.as_str()));
+
+    let salida = Command::new("pacman")
+        .args(&args)
+        .env("LC_ALL", "C")
+        .stderr(Stdio::null())
+        .output()
+        .map(|s| String::from_utf8_lossy(&s.stdout).into_owned())
+        .unwrap_or_default();
+
+    parsear_paginas(&salida)
 }
 
 /// Por qué habría que reiniciar, si hay por qué.

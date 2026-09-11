@@ -175,11 +175,20 @@ fn listar() {
 /// servicio para eso sería un proceso vivo todo el tiempo para contestar cada
 /// tanto.
 fn en_json() {
-    let (pendientes, fallo) = match sistema::estado() {
+    let (mut pendientes, fallo) = match sistema::estado() {
         Estado::Hay(lista) => (lista, None),
         Estado::NoHay => (Vec::new(), None),
         Estado::NoSePudo(fallo) => (Vec::new(), Some(fallo)),
     };
+
+    // Adónde mirar para saber qué cambia. Va sólo acá y no en `--check`: al
+    // aviso no le sirve —dice cuántas hay, no cuáles— y averiguarlo cuesta un
+    // proceso más.
+    let paginas = sistema::paginas_de(&pendientes);
+    for pendiente in &mut pendientes {
+        pendiente.donde_mirar = paginas.get(&pendiente.nombre).cloned();
+    }
+
     // El preflight sólo tiene sentido si se pudo comprobar: sin saber qué se
     // va a actualizar, decir «hay lugar en /boot» es contestar otra pregunta.
     let preflight = fallo.is_none().then(|| sistema::preflight(&pendientes));
