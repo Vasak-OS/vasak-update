@@ -43,6 +43,13 @@ pub struct Actualizacion {
     pub nombre: String,
     pub version_vieja: String,
     pub version_nueva: String,
+    /// A dónde mirar para saber qué cambia, si se sabe.
+    ///
+    /// Es la página del proyecto, que sale de la base de paquetes ya
+    /// sincronizada — o sea sin red. Se llena sólo para `--json`, que es la
+    /// pantalla: al aviso no le sirve y averiguarlo cuesta un proceso más.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub donde_mirar: Option<String>,
 }
 
 /// Lee la salida de `checkupdates`, que es la de `pacman -Qu`.
@@ -77,6 +84,7 @@ pub fn parsear_actualizaciones(salida: &str) -> Vec<Actualizacion> {
                 nombre: nombre.to_string(),
                 version_vieja: vieja.to_string(),
                 version_nueva: nueva.to_string(),
+                donde_mirar: None,
             })
         })
         .collect()
@@ -183,6 +191,48 @@ pub fn es_sesion(archivos: &str) -> bool {
         (l.starts_with("usr/share/wayland-sessions/") || l.starts_with("usr/share/xsessions/"))
             && l.ends_with(".desktop")
     })
+}
+
+/// Lee la salida de `pacman -Si` y se queda con la página de cada paquete.
+///
+/// El formato son bloques separados por una línea en blanco, con campos
+/// `Campo : valor`. Interesan dos: `Name` y `URL`.
+///
+/// **Hay que llamarlo con `LC_ALL=C`.** `pacman` traduce los nombres de los
+/// campos, así que en una sesión en español dice `Nombre` y esto no encontraría
+/// nada — y no fallaría: devolvería un mapa vacío y la pantalla se quedaría sin
+/// enlaces sin que nada lo diga. Es el tipo de error que no se ve hasta que
+/// alguien cambia de idioma.
+///
+/// Un valor `None` de pacman —los paquetes sin página declarada— se descarta:
+/// un enlace que dice «None» es peor que ningún enlace.
+pub fn parsear_paginas(salida: &str) -> HashMap<String, String> {
+    let mut paginas = HashMap::new();
+    let mut nombre: Option<String> = None;
+
+    for linea in salida.lines() {
+        let Some((campo, valor)) = linea.split_once(':') else {
+            continue;
+        };
+        let campo = campo.trim();
+        let valor = valor.trim();
+
+        match campo {
+            "Name" => nombre = Some(valor.to_string()),
+            "URL" => {
+                // El bloque de un paquete trae su `Name` antes que su `URL`.
+                // Si llegara una `URL` suelta, no se le adjudica a nadie.
+                if let Some(quien) = nombre.take() {
+                    if !valor.is_empty() && valor != "None" {
+                        paginas.insert(quien, valor.to_string());
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    paginas
 }
 
 /// Reparte la salida de `pacman -Ql` por paquete.
@@ -879,5 +929,69 @@ esto no es una ruta
         assert!(preflight.pide_reinicio);
         assert!(preflight.pide_volver_a_entrar);
         assert_eq!(preflight.razones.len(), 3);
+    }
+
+    /// Una salida de `pacman -Si` con dos paquetes, recortada a lo que importa.
+    const INFO: &str = "Repository      : core\nName            : systemd\nVersion         : 261.3-1\nURL             : https://github.com/systemd/systemd\nLicenses        : LGPL-2.1-or-later\n\nRepository      : vasakos\nName            : vasak-settings\nVersion         : 0.7.2-1\nURL             : https://github.com/Vasak-OS/vasak-settings\n";
+
+    #[test]
+    fn las_paginas_salen_de_pacman_si() {
+        let paginas = parsear_paginas(INFO);
+        assert_eq!(paginas.len(), 2);
+        assert_eq!(paginas["systemd"], "https://github.com/systemd/systemd");
+        assert_eq!(
+            paginas["vasak-settings"],
+            "https://github.com/Vasak-OS/vasak-settings"
+        );
+    }
+
+    /// `pacman` escribe `None` cuando el paquete no declara página. Un enlace
+    /// que dice «None» es peor que ningún enlace.
+    #[test]
+    fn una_pagina_que_no_existe_no_se_inventa() {
+        let paginas = parsear_paginas("Name            : algo\nURL             : None\n");
+        assert!(paginas.is_empty());
+
+        let vacia = parsear_paginas("Name            : algo\nURL             : \n");
+        assert!(vacia.is_empty());
+    }
+
+    /// Es el modo de falla que importa de esta función. `pacman` traduce los
+    /// nombres de los campos: en una sesión en español dice `Nombre`, y sin
+    /// `LC_ALL=C` esto devolvería un mapa vacío **sin fallar** — la pantalla se
+    /// quedaría sin enlaces y nada lo diría.
+    #[test]
+    fn en_otro_idioma_no_encuentra_nada() {
+        let en_espanol = "Repositorio     : core\nNombre          : systemd\nURL             : https://github.com/systemd/systemd\n";
+        assert!(parsear_paginas(en_espanol).is_empty());
+    }
+
+    #[test]
+    fn una_url_sin_paquete_no_se_le_adjudica_a_nadie() {
+        // El bloque de un paquete trae su `Name` antes que su `URL`. Al revés,
+        // o con una `URL` suelta, se descarta.
+        assert!(parsear_paginas("URL             : https://ejemplo/\n").is_empty());
+
+        // Y una segunda `URL` en el mismo bloque no se le pega al anterior.
+        let dos = parsear_paginas(
+            "Name            : uno\nURL             : https://uno/\nURL             : https://dos/\n",
+        );
+        assert_eq!(dos.len(), 1);
+        assert_eq!(dos["uno"], "https://uno/");
+    }
+
+    #[test]
+    fn una_salida_sin_nada_util_no_rompe() {
+        assert!(parsear_paginas("").is_empty());
+        assert!(parsear_paginas("error: package not found\n").is_empty());
+    }
+
+    /// Las URL llevan `:` adentro. Partir por el primero y no por el último es
+    /// lo que hace que `https://...` llegue entero.
+    #[test]
+    fn la_url_llega_entera() {
+        let paginas =
+            parsear_paginas("Name            : x\nURL             : https://a.b:8443/c?d=1\n");
+        assert_eq!(paginas["x"], "https://a.b:8443/c?d=1");
     }
 }
