@@ -106,15 +106,14 @@ fn comprobar() {
     // el conjunto es el mismo de antes. Si ya hay novedades, avisar no
     // depende de eso y la consulta sería trabajo tirado.
     let mismo_conjunto = huella_actual == recuerdo.huella;
-    let kernels = if mismo_conjunto {
-        sistema::kernels_entre(&pendientes)
-    } else {
-        Vec::new()
-    };
+    let cambia_el_kernel = mismo_conjunto
+        && sistema::razones_entre(&pendientes)
+            .iter()
+            .any(|r| r.motivo == analisis::Motivo::Kernel);
 
     let decision = decidir(
         pendientes.len(),
-        !kernels.is_empty(),
+        cambia_el_kernel,
         &huella_actual,
         &recuerdo,
         ahora,

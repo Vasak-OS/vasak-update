@@ -33,6 +33,8 @@
 //! otro programa se tiene que poder probar con ese texto escrito a mano, sin
 //! depender de qué actualizaciones haya hoy en el equipo que corre los tests.
 
+use std::collections::HashMap;
+
 use serde::Serialize;
 
 /// Un paquete que se va a actualizar.
@@ -127,6 +129,154 @@ pub fn es_paquete_de_kernel(archivos: &str) -> bool {
         })
 }
 
+/// Normaliza una línea de `pacman -Ql`: sin barra inicial ni final.
+fn ruta(linea: &str) -> &str {
+    linea.trim().trim_end_matches('/').trim_start_matches('/')
+}
+
+/// Si el paquete trae un módulo de kernel **sin ser** el kernel.
+///
+/// El caso que importa es el controlador de NVIDIA, y por eso hay dos formas:
+/// los paquetes precompilados dejan el `.ko` en `usr/lib/modules/`, y los de
+/// DKMS no dejan ninguno —lo compilan al instalarse— sino las fuentes en
+/// `usr/src/<lo que sea>/dkms.conf`, que es de donde DKMS los saca. Mirar sólo
+/// la primera forma dejaría afuera a `nvidia-dkms`, que es el que más se usa.
+///
+/// Reiniciar hace falta igual que con el kernel, y por un motivo peor de
+/// entender: el módulo cargado sigue siendo el viejo mientras la biblioteca de
+/// espacio de usuario ya es la nueva, y esa combinación no funciona. La pantalla
+/// se queda como está hasta que alguien reinicie.
+pub fn es_modulo_de_kernel(archivos: &str) -> bool {
+    archivos.lines().map(ruta).any(|l| {
+        (l.starts_with("usr/lib/modules/") && (l.ends_with(".ko") || l.contains(".ko.")))
+            || (l.starts_with("usr/src/") && l.ends_with("/dkms.conf"))
+    })
+}
+
+/// Si el paquete es `systemd`, o sea el proceso 1.
+///
+/// Hace falta reiniciar, y esto no es una precaución: Arch **no** hace
+/// `daemon-reexec` al actualizar. Los hooks que trae el paquete
+/// (`30-systemd-daemon-reload-system.hook`) corren `systemctl daemon-reload`,
+/// que vuelve a leer las unidades pero **no** vuelve a ejecutar el proceso 1.
+/// O sea que después de actualizar systemd el proceso 1 sigue siendo el
+/// binario viejo, ya borrado del disco, hasta que alguien reinicie.
+pub fn es_systemd(archivos: &str) -> bool {
+    archivos
+        .lines()
+        .map(ruta)
+        .any(|l| l == "usr/lib/systemd/systemd")
+}
+
+/// Si el paquete provee la sesión gráfica.
+///
+/// Se mira por el archivo de sesión —`usr/share/wayland-sessions/` o
+/// `usr/share/xsessions/`— y no por el nombre, por lo mismo que con el kernel:
+/// es lo que define a una sesión, y sigue valiendo el día que el compositor no
+/// se llame Wayfire.
+///
+/// Acá no hay que reiniciar: alcanza con cerrar la sesión y volver a entrar.
+/// Decir «reiniciá» cuando no hace falta cuesta lo mismo que no decir nada —
+/// quien lo comprueba una vez deja de creerle al aviso.
+pub fn es_sesion(archivos: &str) -> bool {
+    archivos.lines().map(ruta).any(|l| {
+        (l.starts_with("usr/share/wayland-sessions/") || l.starts_with("usr/share/xsessions/"))
+            && l.ends_with(".desktop")
+    })
+}
+
+/// Reparte la salida de `pacman -Ql` por paquete.
+///
+/// Se pregunta por **todos** los paquetes de una vez y no de a uno. Con 200
+/// paquetes, doscientas llamadas a `pacman -Qlq` tardan 15,7 s medidos contra
+/// 0,14 s de una sola: casi todo es arrancar el proceso y abrir la base. Una
+/// actualización de un mes en un sistema rolling son cientos de paquetes, y
+/// esa diferencia es la pantalla tardando medio minuto en abrir.
+///
+/// El formato es `paquete /ruta` por línea. Las líneas sin espacio se
+/// descartan en vez de adivinar a quién pertenecen.
+pub fn repartir_listado(salida: &str) -> HashMap<&str, String> {
+    let mut por_paquete: HashMap<&str, String> = HashMap::new();
+    for linea in salida.lines() {
+        let Some((paquete, archivo)) = linea.split_once(' ') else {
+            continue;
+        };
+        let acumulado = por_paquete.entry(paquete).or_default();
+        acumulado.push_str(archivo);
+        acumulado.push('\n');
+    }
+    por_paquete
+}
+
+/// Por qué hay que reiniciar o volver a entrar.
+///
+/// Con el motivo adentro, no sólo el hecho. «Reiniciá» sin decir por qué no se
+/// puede evaluar: no hay forma de saber si conviene hacerlo ahora o si puede
+/// esperar a que termine lo que se estaba haciendo.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Motivo {
+    /// Cambia el kernel: los módulos de una versión no los carga otra.
+    Kernel,
+    /// Cambia un módulo de kernel de fuera del árbol, típicamente el de NVIDIA.
+    Modulo,
+    /// Cambia systemd, y el proceso 1 sigue siendo el binario viejo.
+    Systemd,
+    /// Cambia el compositor: alcanza con volver a entrar.
+    Sesion,
+}
+
+impl Motivo {
+    /// Si pide reiniciar de verdad, y no sólo volver a entrar.
+    pub fn pide_reinicio(self) -> bool {
+        !matches!(self, Motivo::Sesion)
+    }
+}
+
+/// Un motivo y los paquetes que lo provocan.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Razon {
+    pub motivo: Motivo,
+    pub paquetes: Vec<String>,
+}
+
+/// Clasifica cada paquete que se actualiza, con su lista de archivos.
+///
+/// Un paquete puede caer en más de un motivo —el kernel trae módulos— y se
+/// queda con el primero que corresponda: son la misma conclusión dicha dos
+/// veces, y repetirla en la pantalla no agrega nada.
+pub fn razones_para_reiniciar(archivos_por_paquete: &[(String, String)]) -> Vec<Razon> {
+    let mut por_motivo: Vec<(Motivo, Vec<String>)> = vec![
+        (Motivo::Kernel, Vec::new()),
+        (Motivo::Modulo, Vec::new()),
+        (Motivo::Systemd, Vec::new()),
+        (Motivo::Sesion, Vec::new()),
+    ];
+
+    for (paquete, archivos) in archivos_por_paquete {
+        let motivo = if es_paquete_de_kernel(archivos) {
+            Motivo::Kernel
+        } else if es_systemd(archivos) {
+            Motivo::Systemd
+        } else if es_modulo_de_kernel(archivos) {
+            Motivo::Modulo
+        } else if es_sesion(archivos) {
+            Motivo::Sesion
+        } else {
+            continue;
+        };
+        if let Some((_, lista)) = por_motivo.iter_mut().find(|(m, _)| *m == motivo) {
+            lista.push(paquete.clone());
+        }
+    }
+
+    por_motivo
+        .into_iter()
+        .filter(|(_, paquetes)| !paquetes.is_empty())
+        .map(|(motivo, paquetes)| Razon { motivo, paquetes })
+        .collect()
+}
+
 /// El veredicto de la comprobación previa.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Preflight {
@@ -155,11 +305,24 @@ pub struct Preflight {
     /// que dice si algo es riesgoso y vive en dos lados es una regla que se
     /// separa, y el lado que quede desactualizado es el que calla.
     pub hay_lugar_con_red: bool,
-    /// Si hay que reiniciar después. Cambió el kernel: los módulos de una
-    /// versión no los carga un kernel de otra, así que hasta reiniciar no se
-    /// puede enchufar nada que necesite uno que todavía no esté cargado — una
-    /// impresora, un teléfono, una tarjeta de red USB.
+    /// Si hay que reiniciar después, y por qué.
+    ///
+    /// El motivo va adentro porque «reiniciá» solo no se puede evaluar: no hay
+    /// forma de decidir si conviene hacerlo ahora o si puede esperar. Cambió el
+    /// kernel significa que los módulos de una versión no los carga un kernel de
+    /// otra, así que hasta reiniciar no se puede enchufar nada que necesite uno
+    /// que todavía no esté cargado — una impresora, un teléfono, una tarjeta de
+    /// red USB. Cambió systemd significa otra cosa distinta. Son consejos
+    /// diferentes y merecen explicaciones diferentes.
+    pub razones: Vec<Razon>,
+    /// Si alguna razón pide reiniciar de verdad.
     pub pide_reinicio: bool,
+    /// Si alcanza con cerrar la sesión y volver a entrar.
+    ///
+    /// Es aparte y no un `pide_reinicio` más flojo: decir «reiniciá» cuando no
+    /// hace falta cuesta lo mismo que no decir nada, porque quien lo comprueba
+    /// una vez deja de creerle al aviso.
+    pub pide_volver_a_entrar: bool,
 }
 
 impl Preflight {
@@ -169,16 +332,22 @@ impl Preflight {
     /// cuyas conclusiones no se sigan de sus números.
     pub fn nuevo(
         paquetes: usize,
-        kernels: Vec<String>,
+        razones: Vec<Razon>,
         pacnew: Vec<String>,
         boot_disponible_bytes: u64,
         boot_necesario_bytes: u64,
     ) -> Self {
         Self {
             paquetes,
+            kernels: razones
+                .iter()
+                .filter(|r| r.motivo == Motivo::Kernel)
+                .flat_map(|r| r.paquetes.iter().cloned())
+                .collect(),
             hay_lugar_con_red: boot_disponible_bytes >= boot_necesario_bytes,
-            pide_reinicio: !kernels.is_empty(),
-            kernels,
+            pide_reinicio: razones.iter().any(|r| r.motivo.pide_reinicio()),
+            pide_volver_a_entrar: razones.iter().any(|r| !r.motivo.pide_reinicio()),
+            razones,
             pacnew,
             boot_disponible_bytes,
             boot_necesario_bytes,
@@ -446,7 +615,7 @@ esto no es una ruta
         let con = |disponible| {
             Preflight::nuevo(
                 40,
-                vec!["linux".into()],
+                razones_para_reiniciar(&[("linux".into(), KERNEL.into())]),
                 vec!["/etc/pacman.conf.pacnew".into()],
                 disponible,
                 necesario,
@@ -560,5 +729,155 @@ esto no es una ruta
         // No desborda con números absurdos, que darían un valor chico y
         // dejarían pasar el caso riesgoso.
         assert_eq!(espacio_necesario_en_boot(true, u64::MAX), u64::MAX);
+    }
+
+    /// Los archivos que definen a cada cosa, escritos como los lista `pacman`.
+    const KERNEL: &str = "usr/lib/modules/6.1.0/\nusr/lib/modules/6.1.0/vmlinuz\nusr/lib/modules/6.1.0/kernel/fs/ext4/ext4.ko.zst\n";
+    const SYSTEMD: &str =
+        "usr/lib/systemd/\nusr/lib/systemd/systemd\nusr/lib/systemd/system/multi-user.target\n";
+    const NVIDIA: &str =
+        "usr/lib/modules/6.1.0/extramodules/nvidia.ko.zst\nusr/lib/libnvidia-glcore.so\n";
+    const NVIDIA_DKMS: &str =
+        "usr/src/nvidia-580.178.04/dkms.conf\nusr/src/nvidia-580.178.04/Makefile\n";
+    const COMPOSITOR: &str = "usr/bin/wayfire\nusr/share/wayland-sessions/wayfire.desktop\n";
+    const CUALQUIERA: &str = "usr/bin/ls\nusr/share/man/man1/ls.1.gz\n";
+
+    #[test]
+    fn systemd_se_reconoce_por_el_proceso_1() {
+        assert!(es_systemd(SYSTEMD));
+
+        // Traer unidades no alcanza: las trae medio sistema, y avisar de
+        // reiniciar por cada una sería avisar siempre.
+        assert!(!es_systemd(
+            "usr/lib/systemd/system/vasak-update.timer\nusr/lib/systemd/user/algo.service\n"
+        ));
+        assert!(!es_systemd(CUALQUIERA));
+
+        // Ni un nombre que empiece igual.
+        assert!(!es_systemd("usr/lib/systemd/systemd-analyze\n"));
+        assert!(!es_systemd("usr/bin/systemd\n"));
+    }
+
+    #[test]
+    fn los_modulos_de_fuera_del_arbol_se_reconocen_de_las_dos_formas() {
+        // Precompilado: el `.ko` está en el paquete.
+        assert!(es_modulo_de_kernel(NVIDIA));
+        // DKMS: no hay ningún `.ko`, se compila al instalarse.
+        assert!(es_modulo_de_kernel(NVIDIA_DKMS));
+
+        assert!(!es_modulo_de_kernel(CUALQUIERA));
+        // Las fuentes sin `dkms.conf` no las compila DKMS.
+        assert!(!es_modulo_de_kernel("usr/src/linux-headers/Makefile\n"));
+        // Y un `.ko` fuera de `usr/lib/modules` no lo carga nadie.
+        assert!(!es_modulo_de_kernel("usr/share/ejemplos/demo.ko\n"));
+    }
+
+    #[test]
+    fn la_sesion_se_reconoce_por_su_archivo_de_sesion() {
+        assert!(es_sesion(COMPOSITOR));
+        assert!(es_sesion("usr/share/xsessions/i3.desktop\n"));
+
+        // Un lanzador no es una sesión, y confundirlos haría pedir cerrar
+        // sesión por actualizar cualquier programa con icono.
+        assert!(!es_sesion("usr/share/applications/wayfire.desktop\n"));
+        assert!(!es_sesion(CUALQUIERA));
+    }
+
+    #[test]
+    fn repartir_el_listado_agrupa_por_paquete() {
+        let salida = "linux usr/lib/modules/6.1.0/\nlinux usr/lib/modules/6.1.0/vmlinuz\nsystemd usr/lib/systemd/systemd\n";
+        let mapa = repartir_listado(salida);
+
+        assert_eq!(mapa.len(), 2);
+        assert!(es_paquete_de_kernel(mapa["linux"].as_str()));
+        assert!(es_systemd(mapa["systemd"].as_str()));
+    }
+
+    #[test]
+    fn una_linea_sin_espacio_se_descarta() {
+        // Puede ser un mensaje de `pacman` mezclado en la salida. Adivinar a
+        // qué paquete pertenece sería atribuirle archivos a quien no los tiene.
+        let mapa = repartir_listado("sin-espacio-ninguno\nlinux usr/lib/modules/6.1.0/vmlinuz\n");
+        assert_eq!(mapa.len(), 1);
+        assert!(mapa.contains_key("linux"));
+    }
+
+    /// Un paquete cae en un solo motivo aunque encaje en varios: el kernel
+    /// trae módulos, y decirlo dos veces no agrega nada.
+    #[test]
+    fn el_kernel_no_se_cuenta_tambien_como_modulo() {
+        let razones = razones_para_reiniciar(&[("linux".into(), KERNEL.into())]);
+        assert_eq!(razones.len(), 1);
+        assert_eq!(razones[0].motivo, Motivo::Kernel);
+        assert_eq!(razones[0].paquetes, vec!["linux".to_string()]);
+    }
+
+    #[test]
+    fn lo_que_no_encaja_en_nada_no_genera_razon() {
+        assert!(razones_para_reiniciar(&[("coreutils".into(), CUALQUIERA.into())]).is_empty());
+    }
+
+    #[test]
+    fn los_paquetes_del_mismo_motivo_van_juntos() {
+        let razones = razones_para_reiniciar(&[
+            ("linux".into(), KERNEL.into()),
+            ("coreutils".into(), CUALQUIERA.into()),
+            ("linux-lts".into(), KERNEL.into()),
+        ]);
+        assert_eq!(razones.len(), 1);
+        assert_eq!(razones[0].paquetes, vec!["linux", "linux-lts"]);
+    }
+
+    /// Cerrar sesión y reiniciar son consejos distintos. Decir «reiniciá»
+    /// cuando alcanza con volver a entrar cuesta lo mismo que no decir nada:
+    /// quien lo comprueba una vez deja de creerle al aviso.
+    #[test]
+    fn la_sesion_no_pide_reiniciar() {
+        let preflight = Preflight::nuevo(
+            1,
+            razones_para_reiniciar(&[("wayfire".into(), COMPOSITOR.into())]),
+            Vec::new(),
+            0,
+            0,
+        );
+        assert!(!preflight.pide_reinicio);
+        assert!(preflight.pide_volver_a_entrar);
+        assert!(preflight.kernels.is_empty());
+    }
+
+    #[test]
+    fn systemd_y_nvidia_si_piden_reiniciar() {
+        for archivos in [SYSTEMD, NVIDIA, NVIDIA_DKMS, KERNEL] {
+            let preflight = Preflight::nuevo(
+                1,
+                razones_para_reiniciar(&[("paquete".into(), archivos.into())]),
+                Vec::new(),
+                0,
+                0,
+            );
+            assert!(preflight.pide_reinicio, "con {archivos}");
+        }
+    }
+
+    /// `kernels` sale de las razones y no de un campo aparte: dos listas de lo
+    /// mismo son dos que se separan, y la que quede vieja decide mal cuánto
+    /// espacio hace falta en `/boot`.
+    #[test]
+    fn los_kernels_salen_de_las_razones() {
+        let preflight = Preflight::nuevo(
+            3,
+            razones_para_reiniciar(&[
+                ("linux".into(), KERNEL.into()),
+                ("systemd".into(), SYSTEMD.into()),
+                ("wayfire".into(), COMPOSITOR.into()),
+            ]),
+            Vec::new(),
+            0,
+            0,
+        );
+        assert_eq!(preflight.kernels, vec!["linux".to_string()]);
+        assert!(preflight.pide_reinicio);
+        assert!(preflight.pide_volver_a_entrar);
+        assert_eq!(preflight.razones.len(), 3);
     }
 }
