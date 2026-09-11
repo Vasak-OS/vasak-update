@@ -24,14 +24,15 @@ use crate::analisis::{
     parsear_pacnew, Actualizacion, Preflight,
 };
 use crate::aviso::Recuerdo;
+use crate::fallos::{clasificar, Fallo};
 
 const DIR_ARRANQUE: &str = "/boot";
 
 /// Corre un programa y devuelve su salida estándar.
 ///
-/// Un programa que no está no es un error: `pacman-contrib` y `pacdiff` son
-/// dependencias del paquete, pero alguien las puede haber sacado. Vacío hace
-/// que la comprobación diga «no encontré nada» en vez de romperse.
+/// Para los que no deciden nada: si `pacdiff` no está, no hay `.pacnew` que
+/// listar y punto. Para `checkupdates` **no** se usa esto, porque ahí la
+/// diferencia entre «no hay nada» y «no pude averiguarlo» es todo.
 fn salida_de(programa: &str, args: &[&str]) -> String {
     Command::new(programa)
         .args(args)
@@ -41,8 +42,48 @@ fn salida_de(programa: &str, args: &[&str]) -> String {
         .unwrap_or_default()
 }
 
-pub fn pendientes() -> Vec<Actualizacion> {
-    parsear_actualizaciones(&salida_de("checkupdates", &[]))
+/// Lo que se pudo averiguar sobre las actualizaciones.
+///
+/// Son tres estados y no dos, que es todo el punto: «hay actualizaciones»,
+/// «no hay», y **«no pude averiguarlo»**. La primera versión tenía dos, y una
+/// clave de firma vencida se veía igual que un sistema al día — o sea que el
+/// aviso callaba para siempre sin que nadie se enterara, que es el peor
+/// fallo posible en un programa cuyo único trabajo es avisar.
+pub enum Estado {
+    Hay(Vec<Actualizacion>),
+    NoHay,
+    NoSePudo(Fallo),
+}
+
+/// Qué hay para actualizar, o por qué no se sabe.
+///
+/// `checkupdates` sale con **2** cuando no hay nada y con **1** cuando no
+/// pudo. En los dos casos la salida estándar está vacía, así que el código de
+/// salida es lo único que los distingue.
+pub fn estado() -> Estado {
+    let Ok(salida) = Command::new("checkupdates").output() else {
+        // Ni siquiera se pudo ejecutar: falta `pacman-contrib`, que es
+        // dependencia del paquete pero alguien la puede haber sacado.
+        return Estado::NoSePudo(Fallo::Desconocido(
+            "no se pudo ejecutar checkupdates (¿falta pacman-contrib?)".into(),
+        ));
+    };
+
+    match salida.status.code() {
+        Some(2) => Estado::NoHay,
+        Some(0) => {
+            let lista = parsear_actualizaciones(&String::from_utf8_lossy(&salida.stdout));
+            if lista.is_empty() {
+                // Salió bien y no se entendió nada: cambió el formato. No es
+                // «no hay», y decir que sí sería el mismo silencio de antes.
+                return Estado::NoSePudo(Fallo::Desconocido(
+                    "checkupdates contestó algo que no se entiende".into(),
+                ));
+            }
+            Estado::Hay(lista)
+        }
+        _ => Estado::NoSePudo(clasificar(&String::from_utf8_lossy(&salida.stderr))),
+    }
 }
 
 /// Cuáles de los que se actualizan son kernels.

@@ -29,9 +29,11 @@
 
 mod analisis;
 mod aviso;
+mod fallos;
 mod sistema;
 
 use aviso::{decidir, huella, Recuerdo};
+use sistema::Estado;
 
 const AYUDA: &str = "\
 vasak-update — avisa cuando hay actualizaciones del sistema
@@ -66,10 +68,31 @@ fn main() {
 /// ni por los `.pacnew`. La mayoría de las corridas terminan acá sin hacer
 /// nada más que la comprobación.
 fn comprobar() {
-    let pendientes = sistema::pendientes();
-    if pendientes.is_empty() {
-        return;
-    }
+    let pendientes = match sistema::estado() {
+        Estado::NoHay => return,
+        Estado::Hay(lista) => lista,
+        // No se pudo averiguar. Los que se arreglan solos —un corte de red—
+        // se callan: avisar de cada uno enseña a ignorar los avisos. Los que
+        // piden que alguien haga algo se dicen, porque hasta entonces el
+        // equipo no se entera de ninguna actualización.
+        Estado::NoSePudo(fallo) => {
+            if !fallo.pide_accion() {
+                return;
+            }
+            let cuerpo = match fallo.arreglo() {
+                Some(comando) => format!("{} \n\n{comando}", fallo.explicacion()),
+                None => fallo.explicacion().to_string(),
+            };
+            if let Some(aviso) = sistema::mostrar_aviso(
+                "No se pudo comprobar si hay actualizaciones",
+                &cuerpo,
+                "Ver",
+            ) {
+                sistema::atender_boton(aviso);
+            }
+            return;
+        }
+    };
 
     let lineas: Vec<String> = pendientes
         .iter()
@@ -123,11 +146,26 @@ fn comprobar() {
 }
 
 fn listar() {
-    for a in sistema::pendientes() {
-        sistema::escribir(&format!(
-            "{} {} -> {}",
-            a.nombre, a.version_vieja, a.version_nueva
-        ));
+    match sistema::estado() {
+        Estado::NoHay => {}
+        Estado::Hay(lista) => {
+            for a in lista {
+                sistema::escribir(&format!(
+                    "{} {} -> {}",
+                    a.nombre, a.version_vieja, a.version_nueva
+                ));
+            }
+        }
+        // Por el error y con código distinto de cero: quien encadene esto en
+        // un script tiene que poder distinguir «no hay nada» de «no pude
+        // averiguarlo», que es exactamente lo que este programa no hacía.
+        Estado::NoSePudo(fallo) => {
+            eprintln!("vasak-update: {}", fallo.explicacion());
+            if let Some(comando) = fallo.arreglo() {
+                eprintln!("  {comando}");
+            }
+            std::process::exit(1);
+        }
     }
 }
 
@@ -138,11 +176,22 @@ fn listar() {
 /// servicio para eso sería un proceso vivo todo el tiempo para contestar cada
 /// tanto.
 fn en_json() {
-    let pendientes = sistema::pendientes();
-    let preflight = sistema::preflight(&pendientes);
+    let (pendientes, fallo) = match sistema::estado() {
+        Estado::Hay(lista) => (lista, None),
+        Estado::NoHay => (Vec::new(), None),
+        Estado::NoSePudo(fallo) => (Vec::new(), Some(fallo)),
+    };
+    // El preflight sólo tiene sentido si se pudo comprobar: sin saber qué se
+    // va a actualizar, decir «hay lugar en /boot» es contestar otra pregunta.
+    let preflight = fallo.is_none().then(|| sistema::preflight(&pendientes));
     let salida = serde_json::json!({
         "pendientes": pendientes,
         "preflight": preflight,
+        "fallo": fallo.as_ref().map(|f| serde_json::json!({
+            "que": f,
+            "explicacion": f.explicacion(),
+            "arreglo": f.arreglo(),
+        })),
     });
     sistema::escribir(&salida.to_string());
 }
