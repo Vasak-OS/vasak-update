@@ -1,6 +1,6 @@
 [package]
 name = "vasak-update"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 description = "Avisa cuando hay actualizaciones del sistema, y qué mirar antes de aplicarlas"
 license = "GPL-3.0-or-later"
@@ -20,6 +20,9 @@ repository = "https://github.com/Vasak-OS/vasak-update"
 # Escribir JSON a mano es donde aparecen los errores de escapado, y una ruta de
 # archivo con comillas adentro es exactamente lo que este programa lista.
 [dependencies]
+# Los directorios base del estándar: la regla de que una variable relativa o
+# vacía se ignora vive ahí y no en una copia acá.
+dirs = "6"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
