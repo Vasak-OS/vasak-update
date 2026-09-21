@@ -213,9 +213,21 @@ fn libre_en_boot() -> u64 {
 /// En el estado y no en la configuración: no es algo que nadie edite, es algo
 /// que este programa recuerda. `XDG_STATE_HOME` existe para exactamente esto.
 fn ruta_del_recuerdo() -> Option<PathBuf> {
-    let base = std::env::var_os("XDG_STATE_HOME")
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/state")))?;
+    // Por `dirs` y no leyendo el entorno acá: aceptaba cualquier valor,
+    // incluida la cadena vacía y cualquier ruta relativa, que el estándar manda
+    // ignorar. Como esto se escribe, una base relativa dejaba el recuerdo bajo
+    // el directorio de trabajo del proceso, y entonces el aviso de
+    // actualizaciones se repetiría cada vez porque nunca encuentra lo que
+    // escribió. `dirs` lo cubre con una sola regla —la cadena vacía tampoco es
+    // absoluta— y de `HOME` sólo mira que no esté vacía, así que el filtro
+    // cierra esa otra mitad.
+    ruta_del_recuerdo_bajo(dirs::state_dir())
+}
+
+/// La misma decisión sin leer el entorno, para poder probarla: el entorno es
+/// global al proceso y las pruebas corren en paralelo.
+fn ruta_del_recuerdo_bajo(base: Option<PathBuf>) -> Option<PathBuf> {
+    let base = base.filter(|base| base.is_absolute())?;
     Some(base.join("vasak-update/ultimo-aviso"))
 }
 
@@ -316,4 +328,39 @@ pub fn atender_boton(aviso: std::process::Child) {
 /// entra en pánico. Corriendo bajo systemd no pasa; corriendo a mano, sí.
 pub fn escribir(texto: &str) {
     let _ = writeln!(std::io::stdout(), "{texto}");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    #[test]
+    fn el_recuerdo_cuelga_del_estado_del_usuario() {
+        assert_eq!(
+            ruta_del_recuerdo_bajo(Some(PathBuf::from("/home/pato/.local/state"))),
+            Some(PathBuf::from(
+                "/home/pato/.local/state/vasak-update/ultimo-aviso"
+            ))
+        );
+    }
+
+    #[test]
+    fn una_base_relativa_no_da_ruta() {
+        // Esto se escribe, así que una base relativa dejaba el recuerdo bajo el
+        // directorio de trabajo del proceso — y entonces el aviso de
+        // actualizaciones se repite cada vez, porque nunca vuelve a encontrar
+        // lo que escribió.
+        //
+        // Las cuatro formas de no ser absoluta: la del nombre suelto es la que
+        // se escapa cuando uno se acuerda sólo de la vacía.
+        for relativa in ["", "estado", "./estado", "../estado"] {
+            assert_eq!(
+                ruta_del_recuerdo_bajo(Some(PathBuf::from(relativa))),
+                None,
+                "una base de {relativa:?} no tiene que dar ruta"
+            );
+        }
+        assert_eq!(ruta_del_recuerdo_bajo(None), None);
+    }
 }
