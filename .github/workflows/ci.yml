@@ -26,3 +26,10 @@ jobs:
     # instala dependencias de terceros.
     secrets:
       SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+    with:
+      # Un solo crate, y ni Tauri ni una biblioteca del sistema: sus 45
+      # pruebas —que leen la salida de `pacman` y `checkupdates` y deciden qué
+      # se avisa y qué no— compilan en un runner pelado. También estaban
+      # escritas y sin correr: una regresión en el análisis de la salida de
+      # pacman llegaba a `main` sin que ninguna corrida las mirara.
+      pruebas_rust: -p vasak-update
