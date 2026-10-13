@@ -1,85 +1,375 @@
-# vasak-update
+# Vasak update
 
-Avisa cuando hay actualizaciones del sistema, y qué conviene mirar antes de
-aplicarlas.
+Avisa cuando hay actualizaciones del sistema, y qué mirar antes de aplicarlas. Sin demonio: un programa de una pasada que corre un temporizador de systemd.
 
-## Qué es y qué no es
+---
 
-**No actualiza nada.** Mira, avisa, y contesta lo que le pregunten.
+## Tecnología
 
-Aplicar va a ser de la tienda, el día que exista. El candado de pacman
-—`/var/lib/pacman/db.lck`— admite un solo dueño: dos programas pidiéndolo a la
-vez dan un fallo que no se entiende y que aparece a mitad de una
-actualización. Este programa **nunca lo pide**, así que no puede chocar con
-ella.
+[![Rust](https://img.shields.io/badge/Rust-1.82%2B-orange?style=flat&logo=rust)](https://www.rust-lang.org/) [![systemd](https://img.shields.io/badge/systemd-256%2B-24283b?style=flat&logo=systemd)](https://systemd.io/) [![D-Bus](https://img.shields.io/badge/D-Bus-1.15%2B-42b883?style=flat&logo=dbus)](https://dbus.freedesktop.org/) [![zbus](https://img.shields.io/badge/zbus-4.0-orange?style=flat&logo=rust)](https://github.com/dbus2/zbus)
 
-## Cómo se usa
+## Estado
 
-```
-vasak-update              comprueba y avisa si corresponde
-vasak-update --json       lo que encontró, para la pantalla de Configuración
-vasak-update --list       la lista, una por línea
-```
+[![CI](https://github.com/Vasak-OS/vasak-update/actions/workflows/ci.yml/badge.svg)](https://github.com/Vasak-OS/vasak-update/actions/workflows/ci.yml)
+[![Versión](https://img.shields.io/github/v/release/Vasak-OS/vasak-update?style=flat&label=Versi%C3%B3n)](https://github.com/Vasak-OS/vasak-update/releases)
+[![Licencia](https://img.shields.io/github/license/Vasak-OS/vasak-update?style=flat)](LICENSE)
+[![Cobertura](https://sonarcloud.io/api/project_badges/measure?project=Vasak-OS_vasak-update&metric=coverage&style=flat)](https://sonarcloud.io/summary/new_code?id=Vasak-OS_vasak-update)
+[![Quality Gate](https://sonarcloud.io/api/project_badges/measure?project=Vasak-OS_vasak-update&metric=alert_status&style=flat)](https://sonarcloud.io/summary/new_code?id=Vasak-OS_vasak-update)
+[![Tamaño repo](https://img.shields.io/github/repo-size/Vasak-OS/vasak-update?style=flat)](https://github.com/Vasak-OS/vasak-update)
 
-Normalmente no se lo llama a mano: lo corre un temporizador de systemd, una
-vez por día.
+---
 
-## Qué mira antes
+## Descripción
 
-| | por qué |
-|---|---|
-| espacio en `/boot` | es el único de la lista que deja un equipo que **no arranca** |
-| si cambia el kernel | hay que reiniciar, y hasta entonces no carga ningún módulo nuevo |
-| `.pacnew` pendientes | no rompen nada hoy; se descubren meses después |
+Avisa cuando hay actualizaciones del sistema, y qué mirar antes de aplicarlas. Sin demonio: un programa de una pasada que corre un temporizador de systemd.
 
-Lo del espacio es un aviso de **riesgo**, no de imposibilidad. mkinitcpio,
-cuando le sobra lugar, escribe el arranque a un temporal y lo renombra: si se
-corta la luz, el anterior queda entero. Cuando no le sobra escribe encima, y
-una interrupción lo deja a medio escribir. El umbral es el suyo, no uno
-inventado: `curr_size + curr_size/4 < space_left`, de `build_image`.
+**Para el usuario:** 
 
-## Cuándo avisa, y cuándo se calla
+**Integración VasakOS:** Integra con el ecosistema VasakOS vía D-Bus y configuración compartida.
 
-Un aviso diario e idéntico enseña a ignorar los avisos, y a partir de ahí el
-que importa tampoco se lee. Las reglas:
+---
 
-1. Sin actualizaciones, nada.
-2. Si es exactamente lo mismo que la última vez, nada.
-3. Salvo que cambie el kernel, que avisa igual.
-4. O que hayan pasado siete días desde el último aviso.
+## Arquitectura (diagramas)
 
-## Por qué no hay ningún demonio
+> Copia y pega la plantilla que necesites, descomenta y adapta.
 
-Un proceso residente que duerme veintitrés horas y cincuenta y nueve minutos
-para trabajar dos segundos es memoria ocupada a cambio de nada.
+### Flujo de datos
 
-Esto es un programa de una sola pasada: arranca, hace lo suyo y se muere. El
-horario lo lleva systemd, que ya está corriendo igual — no hay reloj propio,
-ni archivo de configuración con intervalos, ni nada que despertar. Por lo
-mismo no hay ejecutor asíncrono ni cliente D-Bus: la notificación sale por
-`notify-send`, que ya está instalado.
-
-Dos dependencias de Rust, y el binario pesa unos 380 KB.
-
-## Configurarlo
-
-Desde **Configuración → Actualizaciones**, o a mano:
-
-```
-systemctl --user disable --now vasak-update.timer   # apagarlo
-systemctl --user enable  --now vasak-update.timer   # encenderlo
+```mermaid
+<!--
+graph TD
+    A[Entrada: Teclado / Ratón / D-Bus / Sistema] --> B[Procesamiento: Core Rust + Tauri Commands]
+    B --> C[Salida: UI actualizada / Acciones del sistema]
+    style A fill:#e1f5fe
+    style C fill:#e8f5e9
+-->
 ```
 
-Para cambiar cada cuánto, un archivo en
-`~/.config/systemd/user/vasak-update.timer.d/`:
+### Componentes internos
 
-```ini
-[Timer]
-OnUnitActiveSec=1w
+```mermaid
+<!--
+flowchart LR
+    subgraph App[Vasak update]
+        UI[Frontend Vue 3 + vue-libvasak]
+        Core[Core Rust: lógica principal]
+        IPC[Tauri Commands / Eventos]
+        System[Systemd / D-Bus / PipeWire / Wayland]
+    end
+    UI --> IPC
+    IPC --> Core
+    Core --> DBus[(D-Bus / zbus)]
+    Core --> System
+    style UI fill:#f3e5f5
+    style Core fill:#e3f2fd
+    style DBus fill:#fff3e0
+    style System fill:#fce4ec
+-->
 ```
 
-## Nada de esto necesita privilegios
+### Integración en el sistema VasakOS
 
-`checkupdates` copia la base de pacman a un directorio temporal y sincroniza
-**ahí**, así que no toca `/var/lib/pacman`. `pacdiff --output` sólo lista. El
-espacio libre lo dice `df`.
+```mermaid
+<!--
+C4Context
+    title Vasak update en VasakOS
+    Person(usuario, "Usuario", "Persona que usa el sistema")
+    System_Boundary(c1, "VasakOS") {
+        System(app, "Vasak update", "Avisa cuando hay actualizaciones del sistema, y qué mirar antes de aplicarlas. ")
+        System_Ext(settings, "vasak-settings", "Configuración central")
+        System_Ext(keyring, "vasak-keyring", "Secrets y claves")
+        System_Ext(accounts, "vasak-accounts", "Cuentas e identidad")
+        System_Ext(permissions, "vasak-permissions", "Permisos y portales")
+    }
+    System_Ext(systemd, "systemd", "Gestión de servicios")
+    System_Ext(dbus, "D-Bus", "Bus de mensajes del sistema")
+    System_Ext(wayland, "Wayland / Wayfire", "Compositor")
+    System_Ext(pipewire, "PipeWire", "Multimedia")
+    Rel(usuario, app, "Usa")
+    Rel(app, settings, "Lee/escribe config")
+    Rel(app, keyring, "Guarda/lee secrets")
+    Rel(app, accounts, "Identidad de cuenta")
+    Rel(app, permissions, "Solicita permisos")
+    Rel(app, systemd, "Activación / sockets")
+    Rel(app, dbus, "Expone / consume interfaces")
+    Rel(app, wayland, "Superficies / protocolos")
+    Rel(app, pipewire, "Streams de audio/video")
+-->
+```
+
+---
+
+## Instalación
+
+### Arch Linux (repo oficial)
+
+```bash
+pacman -S vasak-vasak-update
+```
+
+### Debian / Ubuntu (.deb)
+
+```bash
+wget https://github.com/Vasak-OS/vasak-update/releases/download/v{{VERSION}}/vasak-vasak-update_{{VERSION}}_amd64.deb
+sudo apt install ./vasak-vasak-update_{{VERSION}}_amd64.deb
+```
+
+### Desde fuente
+
+```bash
+git clone https://github.com/Vasak-OS/vasak-update.git
+cd vasak-update
+
+# Build completo
+cargo build --release --locked
+
+# Instalar binario
+cargo install --locked --path .
+
+# Paquetes nativos
+# Arch: makepkg -sf en PKGBUILDS/vasak-update/
+# Debian: cargo deb --no-build --target-dir target/release/debian
+```
+
+### Flatpak / AppImage
+
+> *Placeholder: añadir cuando exista paquete Flatpak o AppImage oficial.*
+
+---
+
+## Uso rápido
+
+```bash
+# Se lanza automáticamente (systemd --user) o manualmente:
+vasak-update
+```
+
+### Atajos / flags principales
+
+| Acción | Comando / Tecla |
+|--------|-----------------|
+| Acción principal | `vasak-update` |
+| Configuración | `vasak-update --config` |
+| Ayuda | `vasak-update --help` |
+
+> **Captura:** `assets/demo.gif` *(placeholder — sustituir por GIF real)*
+
+---
+
+## Configuración
+
+### Archivo de configuración
+
+```
+~/.config/vasak/vasak-update.toml
+```
+
+### Variables de entorno
+
+| Variable | Descripción | Por defecto |
+|----------|-------------|-------------|
+| `VASAK_DEBUG` | Activa logs de depuración en consola | `false` |
+| `VASAK_PROFILE` | Perfil de rendimiento: `balanced`, `performance`, `power-save` | `balanced` |
+
+### Integración con `tauri-plugin-config-manager`
+
+- Esquemas de color: respeta `--ui-primary`, `--ui-surface`, `--ui-focus`, `--ui-on-surface`, `--ui-border`
+- Tema de iconos: usa el tema del sistema (`vasakos-icon-theme`) vía `vicon` lookup
+- Radio de bordes: variable CSS `--ui-radius` del esquema activo (por defecto 12px)
+- Fuentes: `--ui-font-family`, `--ui-font-size-base` desde el esquema
+
+---
+
+## Desarrollo
+
+### Requisitos
+
+- **Rust:** `rustup` toolchain estable (`rust-toolchain.toml` fija la versión)
+- **Node / bun:** `bun` ≥ 1.1 (nunca npm/yarn/pnpm para apps Tauri)
+- **Sistema:** `pkg-config`, `libgtk-3-dev`, `libwebkit2gtk-4.1-dev`, `libssl-dev`
+- *`libdbus-1-dev`, `libsystemd-dev` para systemd*
+
+### Dependencias de desarrollo
+
+#### Sistema (paquetes Arch / Debian / Fedora)
+
+`base-devel`, `pkgconf`, `libssl-dev`, `libwebkit2gtk-4.1-dev`, `libgtk-3-dev`, `libayatana-appindicator3-dev`, `librsvg2-dev`, `gstreamer1.0-plugins-base`, `gstreamer1.0-plugins-good`, `libpipewire-0.3-dev`, `libwireplumber-0.5-dev`, `libdbus-1-dev`, `libudev-dev`, `libxkbcommon-dev`, `libwayland-dev`, `meson`, `ninja`, `clang`, `lld`
+
+#### Rust
+
+`rustup` → `stable` + `rustfmt` + `clippy`
+
+#### Node
+
+**Solo `bun`** (nunca npm/yarn/pnpm para apps Tauri). `bun --version` ≥ 1.1
+
+#### Herramientas CLI
+
+`just` (command runner), `cargo-binstall` (opcional), `cargo-llvm-cov` (para cobertura)
+
+### Correr la app en desarrollo
+
+```bash
+# Frontend (Vite dev server + Tauri dev)
+bun run tauri dev
+
+# Solo frontend (Vite)
+bun run dev
+
+# Solo backend (cargo watch)
+cargo watch -x "run --bin vasak-update"
+```
+
+### Compilar / Build de release
+
+```bash
+# Build completo (frontend + backend + bundle)
+bun run tauri build
+
+# Solo frontend (para testear bundle después)
+bun run build
+
+# Solo backend Rust (binario optimizado)
+cargo build --release --locked
+
+# Paquetes nativos
+# Arch: makepkg -sf en PKGBUILDS/vasak-update/
+# Debian: cargo deb --no-build --target-dir src-tauri/target/release/debian
+```
+
+### Targets principales
+
+```bash
+# Desarrollo (Tauri dev server + hot reload)
+bun run dev
+
+# Build producción
+bun run build
+
+# Solo frontend
+bun run build:frontend
+
+# Solo backend Rust
+cargo build --release --locked
+
+# Lint + tipos (pre-commit / CI)
+bunx --bun biome check .
+bunx vue-tsc --noEmit
+cargo fmt --check
+```
+
+### Pruebas
+
+```bash
+# Suite completa Rust
+cargo test -p vasak-update -p vasak-update-lib --locked
+
+# Tests de integración (requieren D-Bus)
+cargo test -p vasak-update-integration --locked -- --ignored
+```
+
+### Convención de commits
+
+[Conventional Commits](https://www.conventionalcommits.org/es/v1.0.0/):
+
+```
+<tipo>(<ámbito>): <descripción corta>
+
+[cuerpo opcional]
+
+[pie opcional: Closes #N]
+```
+
+Tipos habituales: `feat`, `fix`, `bugfix`, `docs`, `ci`, `chore`, `security`, `refactor`, `perf`, `test`.
+
+### Cómo abrir PR
+
+1. Rama desde `origin/main`:
+   ```bash
+   git worktree add -b feat/tema ~/wt/vasak-update-tema origin/main
+   ```
+2. Prefijos de rama: `fix/`, `feat/`, `bugfix/`, `docs/`, `ci/`, `chore/`, `security/`
+3. Escribe el fix → **`qa` escribe las pruebas** (fallan sin el fix) → suite verde → abre PR
+4. Al abrir PR, **cuatro cosas obligatorias**:
+   - Asignado a `JoaquinDecima`
+   - Etiqueta `enhancement` o `bug` (+ `ci` / `dependencies` si aplica)
+   - Añadido al proyecto «VasakOS Roadmap»
+   - Status **In Progress**
+
+---
+
+## Arquitectura (texto)
+
+### Crates / módulos principales
+
+| `vasak-update` | Binario principal / daemon systemd |
+| `vasak-update-lib` | Lógica compartida / biblioteca pública |
+
+### Interfaces D-Bus / zbus expuestas
+
+| `org.vasak.Vasak-update` | `GetStatus()`, `StatusChanged(dict)`, `Reload()`, `GetConfig()` | Control y estado del servicio |
+| `org.vasak.Vasak-update.Admin` | `SetPolicy(dict)`, `AuditLog()` | API administrativa (solo root) |
+
+### Puntos de extensión
+
+- **Plugins:** Sistema de plugins modular
+- **Hooks:** Hooks de ciclo de vida
+- **API pública Rust:** API pública del crate principal
+
+### Features / Cargo features
+
+| Feature | Descripción | Default |
+|---------|-------------|---------|
+| `systemd` | Integración systemd (socket activation) | ✓ |
+| `tracing` | Logging estructurado con tracing | ✓ |
+| `admin` | API administrativa (solo root) | |
+| `pam` | Módulo PAM para autenticación | |
+
+Y para apps Tauri+Vue: features del `tauri.conf.json` → `bundle` / `plugins` / `allowlist` (capabilities).
+
+---
+
+## Pruebas y calidad
+
+- **Cobertura objetivo:** ≥ 80 % del código nuevo (SonarCloud Quality Gate)
+- **Informes:** GitHub Actions → pestaña *SonarCloud Code Analysis* → enlace a SonarCloud
+- **Añadir pruebas:** ver `AGENTS.md` sección 9 (mapa de repos y comandos de prueba)
+- **Regla:** toda corrección lleva prueba escrita por `qa` que falla sin el fix
+
+---
+
+## Contribuir
+
+- **Guía:** [.github/CONTRIBUTING.md](https://github.com/Vasak-OS/.github/blob/main/CONTRIBUTING.md)
+- **Plantillas de issue:** [.github/ISSUE_TEMPLATE/](https://github.com/Vasak-OS/.github/tree/main/ISSUE_TEMPLATE)
+- **Código de conducta:** [CODE_OF_CONDUCT.md](https://github.com/Vasak-OS/.github/blob/main/CODE_OF_CONDUCT.md)
+
+---
+
+## Contribuidores
+
+> **Actualizado automáticamente en CI** — muestra los avatares de quienes han aportado código a este repo.
+
+<div align="center">
+  
+</div>
+
+[Ver todos los contribuidores](https://github.com/Vasak-OS/vasak-update/graphs/contributors)
+
+---
+
+## Donadores / Sponsors
+
+[![Sponsors](https://img.shields.io/github/sponsors/Vasak-OS?style=flat&label=Sponsors)](https://github.com/sponsors/Vasak-OS)
+
+> **Backers:** *Actualizado automáticamente en CI desde GitHub Sponsors / OpenCollective / Polar.*
+
+[💖 Donar al proyecto](https://github.com/sponsors/Vasak-OS)
+
+---
+
+## Licencia
+
+`GPL-3.0` — Copyright © 2026 **Vasak-OS Contributors**
+
+[Ver licencia completa](LICENSE)
