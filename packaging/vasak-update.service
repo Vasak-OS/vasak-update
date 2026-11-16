@@ -15,14 +15,15 @@ ExecStart=/usr/bin/vasak-update --check
 # —o que se cuelga— deje esto corriendo hasta el próximo arranque.
 TimeoutStartSec=3min
 
-# Un comprobador de actualizaciones no necesita nada del sistema: lee la base
-# de pacman, escribe un archivo suyo en el estado del usuario y manda una
-# notificación. Todo lo demás se le saca.
+# Endurecido, pero con un límite que se descubrió corriéndolo: `checkupdates`
+# baja la base de paquetes con `pacman -Sy`, y pacman la baja dentro de su
+# propio aislamiento (fakeroot y su sandbox de descarga). `PrivateDevices`,
+# `ProtectKernelTunables`, `ProtectKernelModules` y `ProtectControlGroups`
+# —cada uno por su lado— hacen fallar esa bajada con «Cannot fetch updates»,
+# así que con ellos el comprobador daba «no se pudo comprobar» en cada corrida
+# y nunca el número de actualizaciones. Van sacados a propósito; lo que queda
+# endurece sin tocar la descarga.
 NoNewPrivileges=true
-PrivateDevices=true
-ProtectKernelTunables=true
-ProtectKernelModules=true
-ProtectControlGroups=true
 RestrictNamespaces=true
 RestrictRealtime=true
 LockPersonality=true
